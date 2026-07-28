@@ -367,6 +367,8 @@ class TransferStatus:
     # (pp_rank, chunk_id); normal homogeneous transfers bypass this.
     received_kv_parts_per_pp: Optional[Dict[Tuple[int, int], Set[int]]] = None
     expected_kv_parts_per_pp: Optional[Dict[Tuple[int, int], int]] = None
+    # Timestamp of the last processed notification (decode-side timing).
+    last_notif_time: float = 0.0
 
     def is_done(self):
         if self.num_pp_ranks_expected is None or not self.received_aux:
@@ -481,6 +483,10 @@ class NixlKVManager(CommonKVManager):
                 FastQueue() for _ in range(transfer_queue_size)
             ]
             self.exceptions: Dict[int, Exception] = {}
+            # Per-room timing from the last completed TransferKVChunk.
+            # Keyed by bootstrap_room, populated by transfer_worker on
+            # is_last_chunk, consumed by NixlKVSender.poll() on Success.
+            self.last_chunk_timing: Dict[int, dict] = {}
             # Mirror mooncake: one staging buffer per worker queue, all
             # built before workers spawn so each worker owns a private
             # buffer (no cross-worker contention on the staging ring).
@@ -1111,6 +1117,7 @@ class NixlKVManager(CommonKVManager):
 
         while True:
             kv_chunk: TransferKVChunk = queue.get()
+            kv_chunk.worker_dequeue_time = time.perf_counter()
             room = kv_chunk.room
             handles: List[Any] = []
             try:
@@ -1315,6 +1322,10 @@ class NixlKVManager(CommonKVManager):
                     # Chunk has been re-enqueued; do not advance status.
                     continue
 
+                # All RDMA transfers have been posted; record the post timestamp
+                if kv_chunk.rdma_post_time == 0.0:
+                    kv_chunk.rdma_post_time = time.perf_counter()
+
                 while handles:
                     all_done = True
                     for handle in handles:
@@ -1329,7 +1340,19 @@ class NixlKVManager(CommonKVManager):
                         break
                     time.sleep(0)
 
+                # All RDMA transfers are DONE; record the completion timestamp
+                if kv_chunk.rdma_done_time == 0.0:
+                    kv_chunk.rdma_done_time = time.perf_counter()
+
                 if kv_chunk.is_last_chunk:
+                    # Store last-chunk timing so NixlKVSender can pick it up
+                    if kv_chunk.enqueue_time > 0.0 and kv_chunk.rdma_done_time > 0.0:
+                        self.last_chunk_timing[room] = {
+                            "enqueue_time": kv_chunk.enqueue_time,
+                            "worker_dequeue_time": kv_chunk.worker_dequeue_time,
+                            "rdma_post_time": kv_chunk.rdma_post_time,
+                            "rdma_done_time": kv_chunk.rdma_done_time,
+                        }
                     self.update_status(room, KVPoll.Success)
                     # Drop per-room state on Success (parity with mooncake
                     # transfer_worker; staging prefetch sets are NIXL-only).
@@ -2401,7 +2424,11 @@ class NixlKVManager(CommonKVManager):
                 chunk_id=chunk_id,
                 prefill_aux_index=aux_index,
                 state_indices=state_indices,
+<<<<<<< HEAD
                 num_kv_tokens=num_kv_tokens,
+=======
+                enqueue_time=time.perf_counter(),
+>>>>>>> 6f4502747 ([PD profiling] Add KV transfer timing instrumentation and queue length metrics)
             )
         )
         return None
@@ -2409,6 +2436,7 @@ class NixlKVManager(CommonKVManager):
     def update_transfer_status(self):
         # Process notifications from received transfers.
         notif_map = self.agent.get_new_notifs()
+        notif_process_time = time.perf_counter()
         for peer_name, messages in notif_map.items():
             for msg in messages:
                 # Notification tag layouts (underscore-separated):
@@ -2448,6 +2476,10 @@ class NixlKVManager(CommonKVManager):
                 elif tag == "state":
                     pp_rank = int(components[2]) if len(components) > 2 else 0
                     self.transfer_statuses[room].received_state_per_pp.add(pp_rank)
+
+                # Record the notification processing timestamp for decode-side timing
+                if room in self.transfer_statuses:
+                    self.transfer_statuses[room].last_notif_time = notif_process_time
 
     def _handle_stg_notification(self, components, room: int):
         """Handle a staging RDMA notification tag.
@@ -2770,6 +2802,20 @@ class NixlKVSender(CommonKVSender):
             self._transfer_metric.transfer_latency_s = (
                 time.perf_counter() - self._transfer_start_time
             )
+            # Populate KV sub-phase metrics from last_chunk_timing
+            room = self.bootstrap_room
+            timing = self.kv_mgr.last_chunk_timing.pop(room, None)
+            if timing is not None:
+                eq = timing["enqueue_time"]
+                dq = timing["worker_dequeue_time"]
+                rp = timing["rdma_post_time"]
+                rd = timing["rdma_done_time"]
+                if dq > eq:
+                    self._transfer_metric.worker_queue_latency_ms = (dq - eq) * 1000
+                if rp > dq:
+                    self._transfer_metric.rdma_post_latency_ms = (rp - dq) * 1000
+                if rd > rp:
+                    self._transfer_metric.rdma_transfer_latency_ms = (rd - rp) * 1000
         return status
 
     def clear(self) -> None:
@@ -2814,6 +2860,7 @@ class NixlKVReceiver(CommonKVReceiver):
         self.started_transfer = False
         super().__init__(mgr, bootstrap_addr, bootstrap_room)
         self.init_time = None
+        self._last_notif_time: float = 0.0
 
     def send_metadata(
         self,
@@ -2897,6 +2944,10 @@ class NixlKVReceiver(CommonKVReceiver):
         status = self.kv_mgr.check_status(self.bootstrap_room)
         if status in (KVPoll.Success, KVPoll.Failed):
             self.conclude_state = status
+            # Store decode-side notification timestamp for timing analysis
+            room_status = self.kv_mgr.transfer_statuses.get(self.bootstrap_room)
+            if room_status and room_status.last_notif_time > 0.0:
+                self._last_notif_time = room_status.last_notif_time
             return status
         if not self.started_transfer:
             return status

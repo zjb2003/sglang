@@ -1299,6 +1299,11 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             preallocated_reqs.append(decode_req)
             indices_to_remove.add(i)
             decode_req.req.time_stats.set_decode_transfer_queue_entry_time()
+            # Store decode-side notification timestamp from the receiver
+            if hasattr(decode_req.kv_receiver, "_last_notif_time"):
+                decode_req.req.time_stats.decode_kv_notif_time = (
+                    decode_req.kv_receiver._last_notif_time
+                )
 
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove

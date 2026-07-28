@@ -34,6 +34,15 @@ class KVTransferMetric:
     alloc_latency_s: Optional[float] = None
     transfer_total_bytes: Optional[int] = None
 
+    # KV transfer sub-phase latencies (NIXL backend only, None if unavailable)
+    worker_queue_latency_ms: Optional[float] = None  # chunk queued → worker dequeued
+    rdma_post_latency_ms: Optional[float] = (
+        None  # worker dequeued → agent.transfer() posted
+    )
+    rdma_transfer_latency_ms: Optional[float] = (
+        None  # agent.transfer() posted → all handles DONE
+    )
+
 
 class KVArgs:
     engine_rank: int

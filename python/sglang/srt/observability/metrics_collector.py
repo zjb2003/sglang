@@ -124,6 +124,14 @@ class SchedulerStats:
     num_prefill_inflight_queue_reqs: QueueCount = field(default_factory=QueueCount)
     num_decode_prealloc_queue_reqs: QueueCount = field(default_factory=QueueCount)
     num_decode_transfer_queue_reqs: QueueCount = field(default_factory=QueueCount)
+    # Total chunks pending across all NIXL transfer-worker queues (prefill side).
+    # Grows when the transfer_worker threads cannot keep up with chunk enqueues;
+    # correlates with K1 worker_queue_ms latency spikes.
+    num_nixl_transfer_queue_chunks: int = 0
+    # Current length of the decode retracted queue (requests waiting for
+    # KV-memory to be freed before re-admission). Distinct from
+    # num_retracted_reqs which is a cumulative Counter.
+    num_decode_retracted_queue_reqs: int = 0
     kv_transfer_speed_gb_s: float = 0.0
     kv_transfer_latency_ms: float = 0.0
     pending_prealloc_token_usage: float = 0.0
@@ -508,6 +516,26 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
             labelnames=labels.keys(),
             multiprocess_mode="mostrecent",
         )
+        self.num_nixl_transfer_queue_chunks = Gauge(
+            name="sglang:num_nixl_transfer_queue_chunks",
+            documentation=(
+                "Total number of KV chunks pending across all NIXL transfer "
+                "worker queues (prefill side). Grows when transfer workers "
+                "cannot keep up with chunk enqueues; correlates with KV "
+                "transfer worker_queue latency spikes."
+            ),
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
+        self.num_decode_retracted_queue_reqs = Gauge(
+            name="sglang:num_decode_retracted_queue_reqs",
+            documentation=(
+                "The number of requests currently in the decode retracted "
+                "queue (waiting for KV memory to be freed before re-admission)."
+            ),
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
         self.kv_transfer_speed_gb_s = Histogram(
             name="sglang:kv_transfer_speed_gb_s",
             documentation="Histogram of KV cache transfer speed in GB/s.",
@@ -558,6 +586,25 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
             documentation="Histogram of KV cache transfer size in MB.",
             labelnames=labels.keys(),
             buckets=(1, 5, 10, 50, 100, 500, 1000, 5000, 10000),
+        )
+        # KV transfer sub-phase histograms (NIXL backend)
+        self.kv_transfer_worker_queue_ms = Histogram(
+            name="sglang:kv_transfer_worker_queue_ms",
+            documentation="Histogram of KV transfer worker queue wait time in ms.",
+            labelnames=labels.keys(),
+            buckets=(0.1, 0.5, 1, 2, 5, 10, 25, 50, 100),
+        )
+        self.kv_transfer_rdma_post_ms = Histogram(
+            name="sglang:kv_transfer_rdma_post_ms",
+            documentation="Histogram of KV transfer RDMA post (index prep + submit) time in ms.",
+            labelnames=labels.keys(),
+            buckets=(0.1, 0.5, 1, 2, 5, 10, 25, 50, 100),
+        )
+        self.kv_transfer_rdma_transfer_ms = Histogram(
+            name="sglang:kv_transfer_rdma_transfer_ms",
+            documentation="Histogram of KV transfer RDMA hardware transfer time in ms.",
+            labelnames=labels.keys(),
+            buckets=(0.1, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500),
         )
 
         # =================================================================
@@ -1159,6 +1206,24 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
         self._log_histogram(self.kv_transfer_bootstrap_ms, bootstrap_ms)
         self._log_histogram(self.kv_transfer_alloc_ms, alloc_ms)
 
+    def observe_kv_transfer_sub_phase(
+        self,
+        phase: str,
+        latency_ms: float,
+    ) -> None:
+        """Observe a KV transfer sub-phase latency.
+
+        Args:
+            phase: One of "worker_queue", "rdma_post", "rdma_transfer".
+            latency_ms: Latency in milliseconds.
+        """
+        if phase == "worker_queue":
+            self._log_histogram(self.kv_transfer_worker_queue_ms, latency_ms)
+        elif phase == "rdma_post":
+            self._log_histogram(self.kv_transfer_rdma_post_ms, latency_ms)
+        elif phase == "rdma_transfer":
+            self._log_histogram(self.kv_transfer_rdma_transfer_ms, latency_ms)
+
     def observe_per_stage_req_latency(self, stage: str, latency: float) -> None:
         labels_with_stage = {**self.labels, "stage": stage}
         self.per_stage_req_latency_seconds.labels(**labels_with_stage).observe(latency)
@@ -1335,6 +1400,13 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
         )
         self._log_gauge_queue_count(
             self.num_decode_transfer_queue_reqs, stats.num_decode_transfer_queue_reqs
+        )
+        self._log_gauge(
+            self.num_nixl_transfer_queue_chunks, stats.num_nixl_transfer_queue_chunks
+        )
+        self._log_gauge(
+            self.num_decode_retracted_queue_reqs,
+            stats.num_decode_retracted_queue_reqs,
         )
         self._log_gauge(
             self.pending_prealloc_token_usage, stats.pending_prealloc_token_usage

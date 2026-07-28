@@ -675,12 +675,28 @@ class SchedulerMetricsReporter:
                 )
                 self.stats.kv_transfer_speed_gb_s = self.kv_transfer_speed_gb_s
                 self.stats.kv_transfer_latency_ms = self.kv_transfer_latency_ms
+                # NIXL transfer-worker queue backlog. Prefill-only; on decode
+                # side there is no equivalent (decode's transfer_workers are
+                # the prefill-side threads).
+                kv_mgr = getattr(
+                    self.scheduler.disagg_prefill_bootstrap_queue, "kv_manager", None
+                )
+                transfer_queues = getattr(kv_mgr, "transfer_queues", None)
+                if transfer_queues is not None:
+                    self.stats.num_nixl_transfer_queue_chunks = sum(
+                        len(q) for q in transfer_queues
+                    )
             elif self.scheduler.disaggregation_mode == DisaggregationMode.DECODE:
                 self.stats.num_decode_prealloc_queue_reqs = QueueCount.from_reqs(
                     self.scheduler.disagg_decode_prealloc_queue.queue, priority_enabled
                 )
                 self.stats.num_decode_transfer_queue_reqs = QueueCount.from_reqs(
                     self.scheduler.disagg_decode_transfer_queue.queue, priority_enabled
+                )
+                # Current length of the retracted queue (distinct from the
+                # cumulative num_retracted_reqs Counter above).
+                self.stats.num_decode_retracted_queue_reqs = len(
+                    self.scheduler.disagg_decode_prealloc_queue.retracted_queue
                 )
 
             # Utilization / LoRA / HiCache
@@ -900,12 +916,23 @@ class SchedulerMetricsReporter:
                 self.stats.num_prefill_inflight_queue_reqs = QueueCount.from_reqs(
                     self.scheduler.disagg_prefill_inflight_queue, priority_enabled
                 )
+                kv_mgr = getattr(
+                    self.scheduler.disagg_prefill_bootstrap_queue, "kv_manager", None
+                )
+                transfer_queues = getattr(kv_mgr, "transfer_queues", None)
+                if transfer_queues is not None:
+                    self.stats.num_nixl_transfer_queue_chunks = sum(
+                        len(q) for q in transfer_queues
+                    )
             elif self.scheduler.disaggregation_mode == DisaggregationMode.DECODE:
                 self.stats.num_decode_prealloc_queue_reqs = QueueCount.from_reqs(
                     self.scheduler.disagg_decode_prealloc_queue.queue, priority_enabled
                 )
                 self.stats.num_decode_transfer_queue_reqs = QueueCount.from_reqs(
                     self.scheduler.disagg_decode_transfer_queue.queue, priority_enabled
+                )
+                self.stats.num_decode_retracted_queue_reqs = len(
+                    self.scheduler.disagg_decode_prealloc_queue.retracted_queue
                 )
 
             # Streaming session metrics

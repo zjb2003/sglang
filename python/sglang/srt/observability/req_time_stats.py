@@ -625,6 +625,17 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
 
     has_timing_data: bool = False
 
+    # KV transfer sub-phase latencies (populated from KVTransferMetric)
+    kv_worker_queue_latency_ms: float = 0.0
+    kv_rdma_post_latency_ms: float = 0.0
+    kv_rdma_transfer_latency_ms: float = 0.0
+
+    # Decode-side: timestamp of the last KV notification processed
+    decode_kv_notif_time: float = 0.0
+
+    # Number of prefill retries for this request
+    prefill_retry_count: int = 0
+
     def __getstate__(self) -> object:
         # send to detokenizer/tokenizer
         if not (self.enable_metrics or self.has_timing_data):
@@ -891,7 +902,8 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
     ) -> Optional[dict]:
         """Compute KV transfer metrics and observe them via the metrics collector.
 
-        Returns a dict with latency_ms, total_mb, speed_gb_s if computable, else None.
+        Returns a dict with latency_ms, total_mb, speed_gb_s, and KV sub-phase
+        breakdowns if computable, else None.
         """
         result = {}
         if transfer_metric.transfer_total_bytes is None:
@@ -929,6 +941,31 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
                     latency_ms=latency_ms,
                     total_mb=total_mb,
                     speed_gb_s=speed_gb_s,
+                )
+
+        # KV transfer sub-phase breakdown (NIXL backend)
+        if transfer_metric.worker_queue_latency_ms is not None:
+            self.kv_worker_queue_latency_ms = transfer_metric.worker_queue_latency_ms
+            result["kv_worker_queue_ms"] = transfer_metric.worker_queue_latency_ms
+        if transfer_metric.rdma_post_latency_ms is not None:
+            self.kv_rdma_post_latency_ms = transfer_metric.rdma_post_latency_ms
+            result["kv_rdma_post_ms"] = transfer_metric.rdma_post_latency_ms
+        if transfer_metric.rdma_transfer_latency_ms is not None:
+            self.kv_rdma_transfer_latency_ms = transfer_metric.rdma_transfer_latency_ms
+            result["kv_rdma_transfer_ms"] = transfer_metric.rdma_transfer_latency_ms
+
+        if self.enable_metrics:
+            if transfer_metric.worker_queue_latency_ms is not None:
+                self.metrics_collector.observe_kv_transfer_sub_phase(
+                    "worker_queue", transfer_metric.worker_queue_latency_ms
+                )
+            if transfer_metric.rdma_post_latency_ms is not None:
+                self.metrics_collector.observe_kv_transfer_sub_phase(
+                    "rdma_post", transfer_metric.rdma_post_latency_ms
+                )
+            if transfer_metric.rdma_transfer_latency_ms is not None:
+                self.metrics_collector.observe_kv_transfer_sub_phase(
+                    "rdma_transfer", transfer_metric.rdma_transfer_latency_ms
                 )
 
         # Bootstrap and alloc durations
@@ -1089,7 +1126,11 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
                 f"forward_duration={self.format_duration(forward_duration)}, "
                 f"entry_time={self.format_wallclock(self.prefill_bootstrap_queue_entry_time)}, "
                 f"transfer_speed={self.transfer_speed_gb_s:.2f} GB/s, "
-                f"transfer_total={self.transfer_total_mb:.2f} MB"
+                f"transfer_total={self.transfer_total_mb:.2f} MB, "
+                f"kv_sub=[worker_queue={self.kv_worker_queue_latency_ms:.2f}ms, "
+                f"rdma_post={self.kv_rdma_post_latency_ms:.2f}ms, "
+                f"rdma_transfer={self.kv_rdma_transfer_latency_ms:.2f}ms], "
+                f"#retries={self.prefill_retry_count}"
             )
         elif self.disagg_mode == DisaggregationMode.DECODE:
             prealloc_duration = self.duration_between(
@@ -1142,7 +1183,8 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
                 f"transfer_duration={self.format_duration(transfer_duration)}, "
                 f"queue_duration={self.format_duration(queue_duration)}, "
                 f"forward_duration={self.format_duration(forward_duration)}, "
-                f"entry_time={self.format_wallclock(self.decode_prealloc_queue_entry_time)}"
+                f"entry_time={self.format_wallclock(self.decode_prealloc_queue_entry_time)}, "
+                f"kv_notif_time={self.format_wallclock(self.decode_kv_notif_time)}"
             )
         else:
             return "Unknown Time Stats"
@@ -1171,6 +1213,58 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
         if start <= 0 or end <= 0:
             return 0.0
         return end - start
+
+    def to_kv_transfer_breakdown_csv(self) -> str:
+        """Return a CSV-formatted line with all PD disaggregation phase latencies.
+
+        This is designed for easy parsing and charting. Fields are in milliseconds.
+        """
+        fields = []
+        if self.disagg_mode == DisaggregationMode.PREFILL:
+            # Prefill phases
+            fields.append(
+                f"P1_api_to_sched={self.duration_between(self.created_time if self.created_time > 0 else self.scheduler_recv_time, self.scheduler_recv_time) * 1e3:.2f}"
+            )
+            fields.append(
+                f"P2_bootstrap={self.duration_between(self.prefill_bootstrap_queue_entry_time, self.bootstrap_done_time) * 1e3:.2f}"
+            )
+            fields.append(
+                f"P3_queue={self.duration_between(self.wait_queue_entry_time, self.forward_entry_time) * 1e3:.2f}"
+            )
+            fields.append(
+                f"P4_forward={self.duration_between(self.forward_entry_time, self.prefill_finished_time) * 1e3:.2f}"
+            )
+            fields.append(
+                f"P5_send_prep={self.duration_between(self.prefill_finished_time, self.prefill_transfer_queue_entry_time) * 1e3:.2f}"
+            )
+            fields.append(
+                f"P6_transfer_total={self.duration_between(self.prefill_transfer_queue_entry_time, self.prefill_kv_transfer_finish_time) * 1e3:.2f}"
+            )
+            # KV sub-phases
+            fields.append(f"K1_worker_queue={self.kv_worker_queue_latency_ms:.2f}")
+            fields.append(f"K2_rdma_post={self.kv_rdma_post_latency_ms:.2f}")
+            fields.append(f"K3_rdma_transfer={self.kv_rdma_transfer_latency_ms:.2f}")
+            # Transfer throughput
+            fields.append(f"transfer_speed_gb_s={self.transfer_speed_gb_s:.2f}")
+            fields.append(f"transfer_total_mb={self.transfer_total_mb:.2f}")
+        elif self.disagg_mode == DisaggregationMode.DECODE:
+            # Decode phases
+            fields.append(
+                f"D1_bootstrap={self.duration_between(self.decode_prealloc_queue_entry_time, self.bootstrap_done_time) * 1e3:.2f}"
+            )
+            fields.append(
+                f"D2_alloc_wait={self.duration_between(self.bootstrap_done_time, self.decode_transfer_queue_entry_time) * 1e3:.2f}"
+            )
+            fields.append(
+                f"D3_transfer_recv={self.duration_between(self.decode_transfer_queue_entry_time, self.wait_queue_entry_time) * 1e3:.2f}"
+            )
+            fields.append(
+                f"D4_queue={self.duration_between(self.wait_queue_entry_time, self.forward_entry_time) * 1e3:.2f}"
+            )
+            fields.append(
+                f"D5_fake_fwd={self.duration_between(self.forward_entry_time, self.decode_prebuilt_finish_time) * 1e3:.2f}"
+            )
+        return ", ".join(fields)
 
     @staticmethod
     def format_wallclock(perf_counter_time: float) -> str:

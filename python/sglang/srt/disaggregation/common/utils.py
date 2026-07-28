@@ -2,6 +2,7 @@ import ctypes
 import dataclasses
 import struct
 import threading
+import time
 from collections import deque
 from typing import List, Optional, Tuple, Union
 
@@ -29,6 +30,14 @@ class TransferKVChunk:
     trace_ctx: Union[TraceReqContext, TraceNullContext] = dataclasses.field(
         default_factory=TraceNullContext
     )
+
+    # Timing instrumentation for KV transfer sub-phases
+    enqueue_time: float = 0.0  # T_kv_send_enqueue: when add_transfer_request is called
+    worker_dequeue_time: float = (
+        0.0  # T_kv_worker_dequeue: when transfer_worker picks up the chunk
+    )
+    rdma_post_time: float = 0.0  # T_kv_rdma_post: when agent.transfer() returns
+    rdma_done_time: float = 0.0  # T_kv_rdma_done: when all xfer handles are DONE
 
 
 def pack_list_of_buffers(buffers: List[bytes]) -> bytes:
@@ -81,6 +90,16 @@ class FastQueue:
             while not self._buf:
                 self._cond.wait()
             return self._buf.popleft()
+
+    def __len__(self) -> int:
+        # Thread-safe current length; used by queue-length metrics.
+        with self._cond:
+            return len(self._buf)
+
+    def qsize(self) -> int:
+        # Alias for __len__ to match the standard Queue API.
+        with self._cond:
+            return len(self._buf)
 
 
 class AuxDataCodec:

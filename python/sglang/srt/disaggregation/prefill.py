@@ -903,6 +903,12 @@ class SchedulerDisaggregationPrefillMixin:
                     self.metrics_reporter.kv_transfer_latency_ms = metrics["latency_ms"]
                 if "speed_gb_s" in metrics:
                     self.metrics_reporter.kv_transfer_speed_gb_s = metrics["speed_gb_s"]
+            # Log the full PD phase breakdown for charting
+            logger.info(
+                "PD_TRANSFER_BREAKDOWN rid=%s %s",
+                req.rid,
+                req.time_stats.to_kv_transfer_breakdown_csv(),
+            )
 
         # Stream requests which have finished transfer
         self.output_streamer.stream_output(
