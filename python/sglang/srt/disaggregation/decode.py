@@ -2214,7 +2214,7 @@ class SchedulerDisaggregationDecodeMixin:
         default; 0 disables). On decode side the snapshot covers:
             prealloc | transfer | waiting | running | retracted
         """
-        interval = envs.SGLANG_PD_QUEUE_SNAPSHOT_INTERVAL
+        interval = envs.SGLANG_PD_QUEUE_SNAPSHOT_INTERVAL.get()
         if interval <= 0:
             return
         now = time.perf_counter()

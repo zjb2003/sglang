@@ -661,7 +661,7 @@ class SchedulerDisaggregationPrefillMixin:
         On prefill side the snapshot covers:
             bootstrap | waiting | running | inflight | nixl_chunks
         """
-        interval = envs.SGLANG_PD_QUEUE_SNAPSHOT_INTERVAL
+        interval = envs.SGLANG_PD_QUEUE_SNAPSHOT_INTERVAL.get()
         if interval <= 0:
             return
         now = time.perf_counter()
