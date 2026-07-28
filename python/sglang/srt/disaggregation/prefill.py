@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from array import array
 from collections import deque
 from http import HTTPStatus
@@ -588,6 +589,9 @@ class SchedulerDisaggregationPrefillMixin:
 
             self.process_disagg_prefill_inflight_queue()
 
+            # Periodic single-line queue snapshot for bottleneck triage.
+            self._log_pd_queue_snapshot()
+
             # Update last_batch
             self.last_batch = batch
 
@@ -636,6 +640,9 @@ class SchedulerDisaggregationPrefillMixin:
 
             self.process_disagg_prefill_inflight_queue()
 
+            # Periodic single-line queue snapshot for bottleneck triage.
+            self._log_pd_queue_snapshot()
+
             # Run sample of the current batch
             # It depends on the result of the last batch (e.g., grammar), so we run it after the last batch is processed.
             self.launch_batch_sample_if_needed(batch_result, batch)
@@ -643,6 +650,46 @@ class SchedulerDisaggregationPrefillMixin:
             # Update last_batch
             self.last_batch = batch
 
+    def _log_pd_queue_snapshot(self: Scheduler) -> None:
+        """Emit a periodic single-line PD queue snapshot to the log.
+
+        Printed at most every ``SGLANG_PD_QUEUE_SNAPSHOT_INTERVAL`` seconds (1s
+        default; 0 disables). Provides a grep-friendly one-liner showing all
+        PD-relevant queue depths so operators can locate which queue is
+        backing up without a Prometheus/Grafana dashboard.
+
+        On prefill side the snapshot covers:
+            bootstrap | waiting | running | inflight | nixl_chunks
+        """
+        interval = envs.SGLANG_PD_QUEUE_SNAPSHOT_INTERVAL
+        if interval <= 0:
+            return
+        now = time.perf_counter()
+        last = getattr(self, "_last_pd_queue_snapshot_t", 0.0)
+        if now - last < interval:
+            return
+        self._last_pd_queue_snapshot_t = now
+
+        nixl_chunks = 0
+        kv_mgr = getattr(
+            self.disagg_prefill_bootstrap_queue, "kv_manager", None
+        )
+        transfer_queues = getattr(kv_mgr, "transfer_queues", None)
+        if transfer_queues is not None:
+            nixl_chunks = sum(len(q) for q in transfer_queues)
+
+        running = len(self.running_batch.reqs) if self.running_batch else 0
+        logger.info(
+            "PD_QUEUE_SNAPSHOT mode=prefill bootstrap=%d waiting=%d "
+            "running=%d inflight=%d nixl_chunks=%d",
+            len(self.disagg_prefill_bootstrap_queue.queue),
+            len(self.waiting_queue),
+            running,
+            len(self.disagg_prefill_inflight_queue),
+            nixl_chunks,
+        )
+
+    @torch.no_grad()
     def process_batch_result_disagg_prefill(
         self: Scheduler,
         batch: ScheduleBatch,

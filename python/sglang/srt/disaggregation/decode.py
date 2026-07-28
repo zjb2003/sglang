@@ -2141,6 +2141,9 @@ class SchedulerDisaggregationDecodeMixin:
                 # When the server is idle, do self-check and re-init some states
                 self.on_idle()
 
+            # Periodic single-line queue snapshot for bottleneck triage.
+            self._log_pd_queue_snapshot_decode()
+
             # Update last_batch
             self.last_batch = batch
 
@@ -2198,8 +2201,38 @@ class SchedulerDisaggregationDecodeMixin:
             # It depends on the result of the last batch (e.g., grammar), so we run it after the last batch is processed.
             self.launch_batch_sample_if_needed(batch_result, batch)
 
+            # Periodic single-line queue snapshot for bottleneck triage.
+            self._log_pd_queue_snapshot_decode()
+
             # Update last_batch
             self.last_batch = batch
+
+    def _log_pd_queue_snapshot_decode(self: Scheduler) -> None:
+        """Emit a periodic single-line PD queue snapshot to the log (decode side).
+
+        Printed at most every ``SGLANG_PD_QUEUE_SNAPSHOT_INTERVAL`` seconds (1s
+        default; 0 disables). On decode side the snapshot covers:
+            prealloc | transfer | waiting | running | retracted
+        """
+        interval = envs.SGLANG_PD_QUEUE_SNAPSHOT_INTERVAL
+        if interval <= 0:
+            return
+        now = time.perf_counter()
+        last = getattr(self, "_last_pd_queue_snapshot_t", 0.0)
+        if now - last < interval:
+            return
+        self._last_pd_queue_snapshot_t = now
+
+        running = len(self.running_batch.reqs) if self.running_batch else 0
+        logger.info(
+            "PD_QUEUE_SNAPSHOT mode=decode prealloc=%d transfer=%d "
+            "waiting=%d running=%d retracted=%d",
+            len(self.disagg_decode_prealloc_queue.queue),
+            len(self.disagg_decode_transfer_queue.queue),
+            len(self.waiting_queue),
+            running,
+            len(self.disagg_decode_prealloc_queue.retracted_queue),
+        )
 
     def _run_batch_prebuilt(
         self: Scheduler, batch: ScheduleBatch
