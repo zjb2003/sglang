@@ -4,10 +4,16 @@
 
 Reads the worker logs from the prefill and decode nodes, extracts every
 ``PD_REQ_TRACE`` line, and aligns each request's lifecycle across the two
-sides by ``rid`` (the cross-node-consistent request uuid). Requests whose
-lifecycle did not reach a terminal stage (``enter_running`` on decode /
-``enter_inflight`` on prefill) are reported as stuck, with the exact stage
-where each side halted, so the deadlock break point is visible at a glance.
+sides by ``bootstrap_room`` (the cross-node-consistent key the router assigns
+and forwards to both prefill and decode — rids are NOT shared across nodes in
+PD mode, since each side receives a separate HTTP request and generates its
+own uuid rid). Requests whose lifecycle did not reach a terminal stage
+(``enter_running`` on decode / ``enter_inflight`` on prefill) are reported as
+stuck, with the exact stage where each side halted, so the deadlock break
+point is visible at a glance.
+
+Health-check / fake-bootstrap requests have ``room=0`` and cannot be aligned;
+they are dropped from the analysis.
 
 Log line format produced by the tracing code (see prefill.py / decode.py):
 
@@ -21,6 +27,8 @@ Usage:
     python3 scripts/pd_trace_analyze.py --combined both.log
     # show every request, not just the stuck ones:
     python3 scripts/pd_trace_analyze.py --prefill prefill.log --decode decode.log --all
+    # show only one bootstrap_room:
+    python3 scripts/pd_trace_analyze.py --prefill prefill.log --decode decode.log --room 1001571391603062128
 """
 
 import argparse
@@ -131,14 +139,26 @@ def load_events(path: Optional[str]) -> List[TraceEvent]:
     return events
 
 
-def group_by_rid(events: List[TraceEvent]) -> Dict[str, List[TraceEvent]]:
-    """Group events by rid, preserving chronological order within each rid."""
-    by_rid: Dict[str, List[TraceEvent]] = defaultdict(list)
+def group_by_room(events: List[TraceEvent]) -> Dict[str, List[TraceEvent]]:
+    """Group events by bootstrap_room, preserving chronological order.
+
+    In PD disaggregation the prefill and decode nodes receive *separate* HTTP
+    requests from the router and each generates its own rid (uuid), so rid is
+    NOT consistent across nodes. The cross-node alignment key is the
+    ``bootstrap_room`` that the router assigns and forwards to both sides —
+    that is the value NIXL uses to match a sender on prefill with a receiver
+    on decode.
+    """
+    by_room: Dict[str, List[TraceEvent]] = defaultdict(list)
     for ev in events:
-        by_rid[ev.rid].append(ev)
-    for rid in by_rid:
-        by_rid[rid].sort(key=lambda e: e.sort_key)
-    return by_rid
+        # room=0 (or missing) is the fake/health-check path — not a real PD
+        # request, so it cannot be aligned and is dropped from analysis.
+        if not ev.room or ev.room == "0":
+            continue
+        by_room[ev.room].append(ev)
+    for room in by_room:
+        by_room[room].sort(key=lambda e: e.sort_key)
+    return by_room
 
 
 def is_stuck(events: List[TraceEvent]) -> bool:
@@ -159,15 +179,22 @@ def stage_index(side: str, stage: str) -> int:
     return order.index(stage) if stage in order else -1
 
 
-def render_rid(rid: str, events: List[TraceEvent], show_all: bool) -> Optional[str]:
-    """Render one rid's aligned timeline. Returns None if it should be skipped."""
+def render_room(room: str, events: List[TraceEvent], show_all: bool) -> Optional[str]:
+    """Render one room's aligned timeline. Returns None if it should be skipped."""
     if not show_all and not is_stuck(events):
         return None
 
     prefill_evs = [e for e in events if e.side == "prefill"]
     decode_evs = [e for e in events if e.side == "decode"]
+    # rids differ per side (PD generates them independently); show both for
+    # cross-referencing with the per-side logs.
+    pf_rid = prefill_evs[0].rid if prefill_evs else None
+    dc_rid = decode_evs[0].rid if decode_evs else None
     lines: List[str] = []
-    lines.append(f"rid={rid}  room={events[0].room}  stuck={is_stuck(events)}")
+    lines.append(
+        f"room={room}  stuck={is_stuck(events)}  "
+        f"prefill_rid={pf_rid}  decode_rid={dc_rid}"
+    )
 
     def fmt_ev(e: TraceEvent) -> str:
         rank = f" [{e.rank}]" if e.rank else ""
@@ -176,19 +203,37 @@ def render_rid(rid: str, events: List[TraceEvent], show_all: bool) -> Optional[s
         extra = f"  {extra}" if extra else ""
         return f"    {ts}{rank}  stage={e.stage}{extra}"
 
-    if prefill_evs:
-        lines.append("  PREFILL:")
-        for e in prefill_evs:
-            lines.append(fmt_ev(e))
-    else:
-        lines.append("  PREFILL: (no events — request never entered prefill bootstrap)")
+    def fmt_side(label: str, evs: List[TraceEvent]) -> List[str]:
+        if not evs:
+            return [f"  {label}: (no events — request never reached this side)"]
+        out = [f"  {label}:"]
+        # Collapse consecutive same-stage lines into one summary line:
+        # the stage is idempotent per poll, so a stuck request can produce
+        # dozens of identical lines. Show first→last timestamp + rank count.
+        i = 0
+        while i < len(evs):
+            j = i
+            while j < len(evs) and evs[j].stage == evs[i].stage:
+                j += 1
+            run = evs[i:j]
+            ranks = sorted({e.rank for e in run if e.rank})
+            ranks_str = f" ranks={len(ranks)}" if len(ranks) > 1 else ""
+            first_ts = run[0].ts or "?"
+            extra = " ".join(f"{k}={v}" for k, v in run[0].extra.items())
+            extra = f"  {extra}" if extra else ""
+            if len(run) == 1:
+                out.append(f"    {first_ts}{ranks_str}  stage={run[0].stage}{extra}")
+            else:
+                last_ts = run[-1].ts or "?"
+                out.append(
+                    f"    {first_ts}→{last_ts}{ranks_str}  stage={run[0].stage}"
+                    f"  (x{len(run)}{extra and '  ' + extra.strip()})"
+                )
+            i = j
+        return out
 
-    if decode_evs:
-        lines.append("  DECODE:")
-        for e in decode_evs:
-            lines.append(fmt_ev(e))
-    else:
-        lines.append("  DECODE: (no events — request never reached decode)")
+    lines += fmt_side("PREFILL", prefill_evs)
+    lines += fmt_side("DECODE", decode_evs)
 
     # Diagnose the break point.
     lines.append("  " + diagnose(events))
@@ -208,7 +253,7 @@ def diagnose(events: List[TraceEvent]) -> str:
             return "DIAG: no trace events on either side."
         if "enter_bootstrap_queue" in p and "bootstrap_done" not in p:
             return ("DIAG: prefill stuck in BOOTSTRAPPING (no bootstrap_done); "
-                    "decode never saw this rid → handshake never reached decode "
+                    "decode never saw this room → handshake never reached decode "
                     "(NIXL bootstrap channel).")
         return "DIAG: prefill progressed but decode never received the request."
 
@@ -226,10 +271,10 @@ def diagnose(events: List[TraceEvent]) -> str:
                         "forwarding to produce KV.")
             if "enter_bootstrap_queue" in p and "bootstrap_done" not in p:
                 return ("DIAG: decode is in transfer_queue (already handshook) "
-                        "but THIS rid on prefill is still bootstrapping → "
-                        "different request batches; check rid alignment.")
+                        "but prefill is still bootstrapping this room → "
+                        "handshake asymmetry between sides.")
             return ("DIAG: decode waiting for KV; prefill side has no inflight "
-                    "events for this rid.")
+                    "events for this room.")
         if "bootstrap_done" in d and "enter_transfer_queue" not in d:
             return ("DIAG: decode handshook (bootstrap_done) but never entered "
                     "transfer_queue → token pool full, request blocked in "
@@ -241,7 +286,7 @@ def diagnose(events: List[TraceEvent]) -> str:
 
     # Reached a terminal-ish stage on decode.
     if "enter_running" in d:
-        return "DIAG: reached enter_running (not deadlocked for this rid)."
+        return "DIAG: reached enter_running (not deadlocked for this room)."
     if "kv_received" in d and "enter_running" not in d:
         return ("DIAG: KV received but not yet running — between kv_received "
                 "and enter_running (transient, not a deadlock).")
@@ -261,7 +306,7 @@ def main() -> int:
                              "--prefill/--decode)")
     parser.add_argument("--all", action="store_true",
                         help="show every request, not just the stuck ones")
-    parser.add_argument("--rid", help="show only this rid")
+    parser.add_argument("--room", help="show only this bootstrap_room")
     args = parser.parse_args()
 
     if args.combined:
@@ -276,24 +321,29 @@ def main() -> int:
               "SGLANG_PD_REQ_TRACE=1?", file=sys.stderr)
         return 1
 
-    by_rid = group_by_rid(events)
-    print(f"Total PD_REQ_TRACE events: {len(events)}")
-    print(f"Distinct rids: {len(by_rid)}")
+    total = len(events)
+    by_room = group_by_room(events)
+    # rids are per-side in PD; count real (non-health-check) rooms instead.
+    dropped = total - sum(len(v) for v in by_room.values())
+    print(f"Total PD_REQ_TRACE events: {total}")
+    if dropped:
+        print(f"  ({dropped} health-check/fake events with room=0 ignored)")
+    print(f"Distinct bootstrap_rooms (real PD requests): {len(by_room)}")
 
-    stuck = [rid for rid, evs in by_rid.items() if is_stuck(evs)]
-    print(f"Stuck rids (no enter_inflight/enter_running): {len(stuck)}")
+    stuck = [room for room, evs in by_room.items() if is_stuck(evs)]
+    print(f"Stuck rooms (no enter_inflight/enter_running): {len(stuck)}")
     print("=" * 78)
 
-    rids = sorted(by_rid.keys())
-    if args.rid:
-        rids = [r for r in rids if r == args.rid]
-        if not rids:
-            print(f"rid={args.rid} not found in logs.", file=sys.stderr)
+    rooms = sorted(by_room.keys())
+    if args.room:
+        rooms = [r for r in rooms if r == args.room]
+        if not rooms:
+            print(f"room={args.room} not found in logs.", file=sys.stderr)
             return 1
 
     shown = 0
-    for rid in rids:
-        rendered = render_rid(rid, by_rid[rid], show_all=args.all)
+    for room in rooms:
+        rendered = render_room(room, by_room[room], show_all=args.all)
         if rendered is None:
             continue
         print(rendered)
