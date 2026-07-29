@@ -3744,6 +3744,7 @@ def _register_encoder_url_with_bootstrap(server_args: ServerArgs):
                 f"{bootstrap_url}/register_encoder_url",
                 json=payload,
                 timeout=request_timeout,
+                proxies={"http": None, "https": None},
             )
             if resp.status_code == 200:
                 logger.info(
