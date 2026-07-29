@@ -280,3 +280,11 @@ artifacts/
 
 # Internal, non-published docs
 internal-docs/
+
+# Local-only PD profiling run scripts / container-copied commands.
+# pd/ holds execution commands copied out of a container for local analysis
+# (not runnable locally). scripts/ already has tracked files; this only ignores
+# new files added under scripts/; already-tracked files are unaffected.
+pd/
+scripts/
+scripts_zjb/
