@@ -73,6 +73,23 @@ def convert_time_to_realtime_ns(time_value: float) -> int:
     return int((time_value + global_diff_realtime_monotonic) * 1e9)
 
 
+def format_wallclock_ms(ts: Optional[float] = None) -> str:
+    """Format a perf_counter timestamp as a wall-clock string ``HH:MM:SS.mmm``.
+
+    Uses the calibrated diff to ``time.time()`` so the result is a real
+    wall-clock time, enabling cross-node log alignment by timestamp.
+    """
+    import datetime
+
+    if ts is None:
+        ts = time.perf_counter()
+    realtime = convert_time_to_realtime(ts)
+    return (
+        datetime.datetime.fromtimestamp(realtime).strftime("%H:%M:%S.")
+        + f"{int((realtime % 1) * 1000):03d}"
+    )
+
+
 def convert_time_cross_thread(
     time_value: float, old_diff: float, new_diff: float
 ) -> float:

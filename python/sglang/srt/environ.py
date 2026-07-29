@@ -421,6 +421,13 @@ class Envs:
 
     # PD queue-length snapshot logging interval (seconds). 0 disables it.
     SGLANG_PD_QUEUE_SNAPSHOT_INTERVAL = EnvFloat(1.0)
+
+    # PD per-request stage transition tracing. When enabled, each request logs a
+    # ``PD_REQ_TRACE`` line (with rid + wall-clock) as it transitions between
+    # bootstrap / prealloc / transfer / running stages on both prefill and decode
+    # sides, so a stuck request's rid can be grep'd across nodes to locate the
+    # deadlock break point. Default off; set SGLANG_PD_REQ_TRACE=1 to enable.
+    SGLANG_PD_REQ_TRACE = EnvBool(False)
     SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER = EnvBool(False)
     SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK = EnvBool(False)
     SGLANG_DISAGGREGATION_SAMPLING_MASK_MAX_TOKENS = EnvInt(0)
