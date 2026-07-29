@@ -230,10 +230,12 @@ class EagleDraftInput(SpecInput):
             self.future_indices = torch.cat(
                 [self.future_indices, spec_info.future_indices]
             )
-            self.future_dsa_topk_indices_available = (
-                self.future_dsa_topk_indices_available
-                and spec_info.future_dsa_topk_indices_available
-            )
+            if spec_info.dsa_topk_indices is not None:
+                spec_info.dsa_topk_indices = spec_info.dsa_topk_indices[:req_size]
+            else:
+                # In overlap mode, dsa_topk_indices may still belong to the prior
+                # batch size. Drop it and refresh from FutureMap at resolve time.
+                spec_info.dsa_topk_indices = None
             return
 
         # Detect idle stub by `topk_index` length (idle inputs have

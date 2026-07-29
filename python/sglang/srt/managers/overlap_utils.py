@@ -403,6 +403,9 @@ class FutureMap:
             assert self.dsa_topk_indices_buf is not None
             draft_input.dsa_topk_indices = self.dsa_topk_indices_buf[indices]
         else:
+            # Buffer not initialized yet (first stash had dsa_topk_indices=None).
+            # Clear stale dsa_topk_indices from a previous smaller batch to avoid
+            # size mismatch when the batch grows (e.g., new prefill requests merged).
             draft_input.dsa_topk_indices = None
         if _DEBUG_ASSERT:
             _assert_nonneg_and_invalidate(
@@ -528,6 +531,22 @@ class FutureMap:
             self.dsa_topk_indices_buf is not None
             and payload.dsa_topk_indices is not None
         ):
+            self.dsa_topk_indices_buf[indices] = payload.dsa_topk_indices.to(
+                self.dsa_topk_indices_buf.dtype
+            )
+        elif (
+            self.dsa_topk_indices_buf is None
+            and payload.dsa_topk_indices is not None
+        ):
+            # Lazy-init when first non-None dsa_topk_indices is seen (e.g., after
+            # draft_extend_for_decode produces a seed). The initial _lazy_init_forward_buf
+            # may have skipped this buffer if the first payload had dsa_topk_indices=None.
+            seed0 = payload.dsa_topk_indices[0]
+            self.dsa_topk_indices_buf = torch.empty(
+                (self.req_pool_size, *seed0.shape),
+                dtype=payload.dsa_topk_indices.dtype,
+                device=self.device,
+            )
             self.dsa_topk_indices_buf[indices] = payload.dsa_topk_indices.to(
                 self.dsa_topk_indices_buf.dtype
             )
