@@ -44,6 +44,7 @@ from sglang.srt.disaggregation.utils import (
     resolve_dcp_dst_entry_indices,
 )
 from sglang.srt.environ import envs
+from sglang.srt.observability.req_time_stats import format_wallclock_ms
 from sglang.srt.runtime_context import get_schedule
 from sglang.srt.server_args import ServerArgs
 
@@ -387,6 +388,54 @@ class TransferStatus:
             if len(self.received_kvs_per_pp[pp_rank]) != expected:
                 return False
         return True
+
+    def dump_not_done_reason(self) -> str:
+        """Return a compact, human-readable summary of why is_done() is False.
+
+        Intended for PD_REQ_TRACE diagnostics: prints the expected vs received
+        counts per pp_rank so a stuck room shows exactly which rank's notifs
+        are missing or under-counting. Call only when is_done() is False.
+        """
+        reasons = []
+        if self.num_pp_ranks_expected is None:
+            reasons.append("num_pp_ranks_expected=None")
+        if not self.received_aux:
+            reasons.append("no_aux_yet")
+        if (
+            self.expects_state
+            and len(self.received_state_per_pp) < (self.num_pp_ranks_expected or 0)
+        ):
+            reasons.append(
+                f"state_missing={len(self.received_state_per_pp)}/"
+                f"{self.num_pp_ranks_expected}"
+            )
+        n_expected_known = len(self.expected_kvs_per_pp)
+        if (
+            self.num_pp_ranks_expected is not None
+            and n_expected_known < self.num_pp_ranks_expected
+        ):
+            reasons.append(
+                f"expected_count_known_for={n_expected_known}/"
+                f"{self.num_pp_ranks_expected}"
+            )
+        # Per-rank chunk gaps: show received vs expected for ranks that have
+        # reported an expected count.
+        gaps = []
+        for pp_rank, expected in sorted(self.expected_kvs_per_pp.items()):
+            got = len(self.received_kvs_per_pp.get(pp_rank, ()))
+            if got != expected:
+                gaps.append(f"pp{pp_rank}:{got}/{expected}")
+        if gaps:
+            reasons.append("chunk_gaps=" + ",".join(gaps))
+        # Which pp_ranks have sent any chunk but no is_last_chunk yet.
+        pending = [
+            f"pp{r}:{len(self.received_kvs_per_pp.get(r, ()))}"
+            for r in sorted(self.received_kvs_per_pp)
+            if r not in self.expected_kvs_per_pp
+        ]
+        if pending:
+            reasons.append("no_last_chunk=" + ",".join(pending))
+        return " ".join(reasons) if reasons else "unknown"
 
 
 class NixlKVManager(CommonKVManager):
@@ -2424,11 +2473,8 @@ class NixlKVManager(CommonKVManager):
                 chunk_id=chunk_id,
                 prefill_aux_index=aux_index,
                 state_indices=state_indices,
-<<<<<<< HEAD
                 num_kv_tokens=num_kv_tokens,
-=======
                 enqueue_time=time.perf_counter(),
->>>>>>> 6f4502747 ([PD profiling] Add KV transfer timing instrumentation and queue length metrics)
             )
         )
         return None
@@ -2523,6 +2569,18 @@ class NixlKVManager(CommonKVManager):
             and self._staging_handler.is_staging_room(room)
         ):
             self._maybe_submit_last_scatter(room)
+        if envs.SGLANG_PD_REQ_TRACE.get():
+            st = self.transfer_statuses[room]
+            logger.info(
+                "PD_REQ_TRACE side=decode stage=aux_notif_arrived "
+                "room=%d ts=%s nokv=%d "
+                "num_pp_ranks_expected=%s received_aux=%s",
+                room,
+                format_wallclock_ms(),
+                int(len(components) > 3 and components[2] == "nokv"),
+                st.num_pp_ranks_expected,
+                st.received_aux,
+            )
 
     def _track_kv_arrival(
         self, room: int, chunk_id: int, is_last_chunk: bool, pp_rank: int
@@ -2541,6 +2599,23 @@ class NixlKVManager(CommonKVManager):
                 and self._staging_handler.is_staging_room(room)
             ):
                 self._maybe_submit_last_scatter(room)
+        if envs.SGLANG_PD_REQ_TRACE.get():
+            st = self.transfer_statuses[room]
+            logger.info(
+                "PD_REQ_TRACE side=decode stage=kv_notif_arrived "
+                "room=%d ts=%s pp_rank=%d chunk_id=%d is_last=%d "
+                "num_pp_ranks_expected=%s "
+                "expected_kvs_per_pp=%s received_kvs_per_pp=%s received_aux=%s",
+                room,
+                format_wallclock_ms(),
+                pp_rank,
+                chunk_id,
+                int(is_last_chunk),
+                st.num_pp_ranks_expected,
+                dict(sorted(st.expected_kvs_per_pp.items())),
+                {r: sorted(s) for r, s in st.received_kvs_per_pp.items()},
+                st.received_aux,
+            )
 
     def _track_kv_part_arrival(
         self,
@@ -2963,11 +3038,31 @@ class NixlKVReceiver(CommonKVReceiver):
             self.conclude_state = KVPoll.Success
             del self.kv_mgr.transfer_statuses[self.bootstrap_room]
             return self.conclude_state  # type: ignore
+        if envs.SGLANG_PD_REQ_TRACE.get():
+            # Log why is_done() is False, but only when the reason changes,
+            # otherwise every scheduler poll would spam one line per stuck
+            # request. This is the steady-state view that complements the
+            # per-notif kv_notif_arrived / aux_notif_arrived trace lines.
+            room_status = self.kv_mgr.transfer_statuses.get(self.bootstrap_room)
+            reason = (
+                room_status.dump_not_done_reason()
+                if room_status is not None
+                else "no_transfer_status"
+            )
+            prev = getattr(self, "_last_not_done_reason", None)
+            if reason != prev:
+                self._last_not_done_reason = reason
+                logger.info(
+                    "PD_REQ_TRACE side=decode stage=kv_transfer_not_done "
+                    "room=%d ts=%s why=%s",
+                    self.bootstrap_room,
+                    format_wallclock_ms(),
+                    reason,
+                )
 
         timeout_result = self._check_waiting_timeout()
         if timeout_result is not None:
             return timeout_result
-
         return KVPoll.WaitingForInput  # type: ignore
 
     def _register_kv_args(self) -> bool:
