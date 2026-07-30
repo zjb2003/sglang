@@ -27,6 +27,9 @@ class TransferKVChunk:
     state_indices: Optional[List]
     chunk_id: Optional[int] = None
     num_kv_tokens: Optional[int] = None
+    # Number of KV chunks this source rank has actually sent (including this
+    # one). The decode side uses this per-rank count for completion tracking.
+    num_sent: int = 0
     trace_ctx: Union[TraceReqContext, TraceNullContext] = dataclasses.field(
         default_factory=TraceNullContext
     )

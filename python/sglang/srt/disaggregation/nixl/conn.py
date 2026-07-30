@@ -1346,17 +1346,25 @@ class NixlKVManager(CommonKVManager):
 
                         if kv_chunk.prefill_aux_index is None:
                             raise RuntimeError("Missing aux index for last chunk")
-                        # A no-KV notification still identifies its PP source.
-                        # Empty non-final chunks do not consume chunk IDs, so a
-                        # final no-KV chunk_id equals the prior KV chunk count.
-                        aux_notif = f"{req.room}_aux"
-                        if (
-                            len(kv_chunk.prefill_kv_indices) == 0
-                            or not self.kv_args.kv_data_ptrs
-                        ):
-                            aux_notif += (
-                                f"_nokv_{self.transfer_source_rank}"
-                                f"_{kv_chunk.chunk_id}"
+                        # The aux notification carries the number of KV chunks
+                        # this source rank actually sent (num_sent), so the
+                        # decode side sets expected_kvs_per_pp[rank] = num_sent
+                        # and completion is "received count == sent count" per
+                        # rank. This is robust to CP sharding where a rank has
+                        # pages in some chunks but not others: a no-page last
+                        # chunk still reports num_sent (which may be > 0 if the
+                        # rank sent earlier chunks), instead of forcing
+                        # expected = 0.
+                        num_sent = kv_chunk.num_sent
+                        if len(kv_chunk.prefill_kv_indices) == 0:
+                            aux_notif = (
+                                f"{req.room}_aux_nokv_{self.kv_args.engine_rank}"
+                                f"_{num_sent}"
+                            )
+                        else:
+                            aux_notif = (
+                                f"{req.room}_aux_{self.kv_args.engine_rank}"
+                                f"_{num_sent}"
                             )
                         aux_xfer_handle = self.send_aux(
                             req.agent_name,
@@ -2443,6 +2451,7 @@ class NixlKVManager(CommonKVManager):
         aux_index: Optional[int] = None,
         state_indices: Optional[List] = None,
         num_kv_tokens: Optional[int] = None,
+        num_sent: int = 0,
     ):
         assert self.disaggregation_mode == DisaggregationMode.PREFILL
         assert not is_last_chunk or (is_last_chunk and aux_index is not None)
@@ -2474,6 +2483,7 @@ class NixlKVManager(CommonKVManager):
                 prefill_aux_index=aux_index,
                 state_indices=state_indices,
                 num_kv_tokens=num_kv_tokens,
+                num_sent=num_sent,
                 enqueue_time=time.perf_counter(),
             )
         )
@@ -2490,7 +2500,11 @@ class NixlKVManager(CommonKVManager):
                 #   kvpart:{room}_kv_{chunk_id}_{is_last}_{pp_rank}_part_{i}_{n}-> 8 fields
                 #   stg:   {room}_stg_{chunk_id}_{is_last}_{pp_rank}_{chunk_idx}
                 #          _{page_start}_{num_pages}_{agent_name}               -> 9 fields
-                #   aux:   {room}_aux                                           -> 2 fields
+                #   aux:   {room}_aux_{pp_rank}_{num_sent}                      -> 4 fields
+                #          (num_sent = KV chunks this rank actually sent;
+                #           decode sets expected_kvs_per_pp[pp_rank] = num_sent)
+                #   aux (nokv): {room}_aux_nokv_{pp_rank}_{num_sent}             -> 5 fields
+                #          (rank sent num_sent KV chunks, 0 for a full cache hit)
                 #   state: {room}_state_{pp_rank}                               -> 3 fields
                 # maxsplit=8 keeps everything past the 8th underscore in the
                 # last component, so agent_name (which may itself contain
@@ -2548,17 +2562,31 @@ class NixlKVManager(CommonKVManager):
         """Handle an aux notification and trigger last scatter if staging is complete.
 
         Notification tag layouts:
-          aux:         {room}_aux                              -> 2 fields
-          aux (nokv):  {room}_aux_nokv_{pp_rank}_{expected}    -> 5 fields
-                       (the last chunk had no KV pages for this rank;
-                       `expected` is the number of prior KV chunks)
+          aux:         {room}_aux_{pp_rank}_{num_sent}             -> 4 fields
+                       (this rank sent num_sent KV chunks; decode sets
+                        expected_kvs_per_pp[pp_rank] = num_sent)
+          aux (nokv):  {room}_aux_nokv_{pp_rank}_{num_sent}        -> 5 fields
+                       (this rank's last chunk had no pages; num_sent may be
+                        > 0 if it sent earlier chunks under CP sharding)
+          legacy aux:  {room}_aux                                  -> 2 fields
+                       (old prefill without num_sent; expected stays unset
+                        for this rank and must come from the is_last KV notif)
         """
         self.transfer_statuses[room].received_aux = True
-        # main's "nokv" marker (decode-side radix cache hit, see #19746).
+        # Both aux variants now carry (pp_rank, num_sent). decode sets
+        # expected_kvs_per_pp[pp_rank] = num_sent, so completion becomes
+        # "received chunk count == num_sent" per rank. This unifies the
+        # has-pages and no-pages last-chunk cases and is robust to CP
+        # sharding where a rank has pages in some chunks but not others.
         if len(components) > 3 and components[2] == "nokv":
             pp_rank = int(components[3])
-            expected = int(components[4]) if len(components) > 4 else 0
-            self.transfer_statuses[room].expected_kvs_per_pp[pp_rank] = expected
+            num_sent = int(components[4]) if len(components) > 4 else 0
+            self.transfer_statuses[room].expected_kvs_per_pp[pp_rank] = num_sent
+        elif len(components) > 3:
+            # Plain aux with num_sent: {room}_aux_{pp_rank}_{num_sent}
+            pp_rank = int(components[2])
+            num_sent = int(components[3])
+            self.transfer_statuses[room].expected_kvs_per_pp[pp_rank] = num_sent
         if self.transfer_statuses[room].num_pp_ranks_expected is None:
             self.transfer_statuses[room].num_pp_ranks_expected = (
                 self.required_prefill_response_num_table.get(room, 1)
@@ -2571,14 +2599,29 @@ class NixlKVManager(CommonKVManager):
             self._maybe_submit_last_scatter(room)
         if envs.SGLANG_PD_REQ_TRACE.get():
             st = self.transfer_statuses[room]
+            is_nokv = len(components) > 3 and components[2] == "nokv"
+            if is_nokv:
+                pp_rank = int(components[3])
+                num_sent = int(components[4]) if len(components) > 4 else 0
+            elif len(components) > 3:
+                pp_rank = int(components[2])
+                num_sent = int(components[3])
+            else:
+                pp_rank = -1
+                num_sent = -1
             logger.info(
                 "PD_REQ_TRACE side=decode stage=aux_notif_arrived "
-                "room=%d ts=%s nokv=%d "
-                "num_pp_ranks_expected=%s received_aux=%s",
+                "room=%d ts=%s nokv=%d pp_rank=%d num_sent=%d "
+                "num_pp_ranks_expected=%s expected_kvs_per_pp=%s "
+                "received_kvs_per_pp=%s received_aux=%s",
                 room,
                 format_wallclock_ms(),
-                int(len(components) > 3 and components[2] == "nokv"),
+                int(is_nokv),
+                pp_rank,
+                num_sent,
                 st.num_pp_ranks_expected,
+                dict(sorted(st.expected_kvs_per_pp.items())),
+                {r: sorted(s) for r, s in st.received_kvs_per_pp.items()},
                 st.received_aux,
             )
 
@@ -2588,7 +2631,11 @@ class NixlKVManager(CommonKVManager):
         """Update transfer status tracking for a kv chunk arrival."""
         self.transfer_statuses[room].received_kvs_per_pp[pp_rank].add(chunk_id)
         if is_last_chunk:
-            self.transfer_statuses[room].expected_kvs_per_pp[pp_rank] = chunk_id + 1
+            # expected_kvs_per_pp[pp_rank] is now set exclusively by the aux
+            # notification (which carries num_sent), NOT here. The old
+            # `expected = chunk_id + 1` assumed chunk_ids were contiguous per
+            # rank, which breaks under CP sharding where an empty middle
+            # chunk no longer occupies a chunk_id (see NixlKVSender.send).
             if self.transfer_statuses[room].num_pp_ranks_expected is None:
                 self.transfer_statuses[room].num_pp_ranks_expected = (
                     self.required_prefill_response_num_table.get(room, 1)
@@ -2824,6 +2871,10 @@ class NixlKVSender(CommonKVSender):
         )
         self.has_sent = False
         self.chunk_id = 0
+        # Counts only chunks that actually carried KV pages (CP-filtered empty
+        # chunks don't increment this). Carried via TransferKVChunk.num_sent so
+        # the aux notification reports the true per-rank sent count.
+        self.num_kv_chunks_sent = 0
         self._send_failed = False
         self._send_error: Optional[Exception] = None
         self._transfer_start_time: Optional[float] = None
@@ -2843,10 +2894,24 @@ class NixlKVSender(CommonKVSender):
         if should_skip:
             return
 
+        # CP-filtered empty non-last chunk: skip it entirely (no
+        # add_transfer_request, no chunk_id increment) so chunk_id stays a
+        # continuous counter of actually-sent chunks. Without this, an empty
+        # middle chunk would occupy a chunk_id that the decode side then
+        # expects to receive, causing a permanent received != expected gap.
+        # The is_last empty chunk is NOT skipped: it must still be enqueued so
+        # the transfer worker emits the aux notification for this rank.
+        if len(kv_indices) == 0 and not is_last_chunk:
+            return
+
         if self._transfer_start_time is None and (
             len(kv_indices) > 0 or state_indices is not None
         ):
             self._transfer_start_time = time.perf_counter()
+
+        if len(kv_indices) > 0:
+            self.num_kv_chunks_sent += 1
+        num_sent = self.num_kv_chunks_sent
 
         self.kv_mgr.add_transfer_request(
             self.bootstrap_room,
@@ -2856,7 +2921,8 @@ class NixlKVSender(CommonKVSender):
             self.chunk_id,
             self.aux_index,
             state_indices,
-            num_kv_tokens,
+            num_kv_tokens=num_kv_tokens,
+            num_sent=num_sent,
         )
         self._record_transfer_indices(kv_indices, state_indices)
         self.chunk_id += 1
