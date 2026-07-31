@@ -263,6 +263,7 @@ from sglang.srt.model_loader.utils import get_resolved_model_impl
 from sglang.srt.multiplex.multiplexing_mixin import SchedulerMultiplexMixin
 from sglang.srt.observability.metrics_collector import SchedulerMetricsCollector
 from sglang.srt.observability.req_time_stats import (
+    format_wallclock_ms,
     set_schedule_time_batch,
     set_time_batch,
 )
@@ -3286,6 +3287,18 @@ class Scheduler(
             self.chunked_req.inflight_middle_chunks += 1
 
         set_time_batch(can_run_list, "set_forward_entry_time")
+        if (
+            envs.SGLANG_PD_REQ_TRACE.get()
+            and self.disaggregation_mode == DisaggregationMode.PREFILL
+        ):
+            for req in can_run_list:
+                logger.info(
+                    "PD_REQ_TRACE side=prefill stage=enter_forward "
+                    "rid=%s room=%s ts=%s",
+                    req.rid,
+                    getattr(req, "bootstrap_room", None),
+                    format_wallclock_ms(),
+                )
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(
