@@ -65,7 +65,10 @@ from sglang.srt.mem_cache.common import (
     release_kv_cache,
 )
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
-from sglang.srt.observability.req_time_stats import set_schedule_time_batch
+from sglang.srt.observability.req_time_stats import (
+    format_wallclock_ms,
+    set_schedule_time_batch,
+)
 from sglang.srt.runtime_context import get_disagg
 from sglang.srt.utils import is_npu
 from sglang.srt.utils.nvtx_utils import scheduler_nvtx_method
@@ -447,6 +450,16 @@ class PrefillBootstrapQueue:
                 bootstrapped_reqs.append(req)
                 indices_to_remove.add(i)
                 req.time_stats.set_wait_queue_entry_time()
+                if envs.SGLANG_PD_REQ_TRACE.get():
+                    logger.info(
+                        "PD_REQ_TRACE side=prefill stage=enter_wait_queue "
+                        "rid=%s room=%s ts=%s from=bootstrap_done "
+                        "bootstrap_done=true decode_prefix_len=%d",
+                        req.rid,
+                        req.bootstrap_room,
+                        format_wallclock_ms(),
+                        req.start_send_idx,
+                    )
             else:
                 raise RuntimeError(
                     f"Unexpected poll state {poll} for req {req.rid} in pop_bootstrapped"
