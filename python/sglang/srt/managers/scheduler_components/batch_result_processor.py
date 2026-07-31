@@ -42,6 +42,7 @@ from sglang.srt.runtime_context import (
 from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
 from sglang.srt.state_capturer.indexer_topk import get_global_indexer_capturer
 from sglang.srt.state_capturer.routed_experts import get_global_experts_capturer
+from sglang.srt.observability.req_time_stats import format_wallclock_ms
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -1058,6 +1059,14 @@ class SchedulerBatchResultProcessor:
                 release_kv_cache(req, self.tree_cache, is_insert=is_insert)
 
             req.time_stats.set_completion_time()
+            if envs.SGLANG_PD_REQ_TRACE.get():
+                logger.info(
+                    "PD_REQ_TRACE side=decode stage=decode_done "
+                    "rid=%s room=%s ts=%s",
+                    req.rid,
+                    getattr(req, "bootstrap_room", None),
+                    format_wallclock_ms(),
+                )
 
         self._maybe_collect_customized_info(i, req, logits_output)
 

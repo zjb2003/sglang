@@ -922,6 +922,14 @@ class SchedulerDisaggregationPrefillMixin:
                 req.disagg_kv_sender.clear()
                 done_reqs.append(req)
                 req.time_stats.set_prefill_kv_transfer_finish_time()
+                if envs.SGLANG_PD_REQ_TRACE.get():
+                    logger.info(
+                        "PD_REQ_TRACE side=prefill stage=inflight_done "
+                        "rid=%s room=%s ts=%s",
+                        req.rid,
+                        req.bootstrap_room,
+                        format_wallclock_ms(),
+                    )
             elif poll == KVPoll.Failed:
                 self.handle_inflight_transfer_failure(req)
                 done_reqs.append(req)
