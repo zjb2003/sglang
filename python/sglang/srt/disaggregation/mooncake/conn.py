@@ -190,6 +190,8 @@ class KVArgsRegisterInfo:
 
 class MooncakeKVManager(CommonKVManager):
     AUX_DATA_HEADER = b"AUX_DATA"
+    _queue_pending_bytes: List[int] = []
+    _pbytes_lock = threading.Lock()
 
     def __init__(
         self,
