@@ -1534,7 +1534,21 @@ class MooncakeKVManager(CommonKVManager):
         _chunk_ct = 0
         _total_bytes = 0
         _total_rdma_ms = 0.0
-        _last_stats = time.perf_counter()
+
+        def _stats_reporter():
+            while True:
+                time.sleep(0.1)
+                _pend = 0
+                if worker_index < len(MooncakeKVManager._queue_pending_bytes):
+                    with MooncakeKVManager._pbytes_lock:
+                        _pend = MooncakeKVManager._queue_pending_bytes[worker_index]
+                logger.info(
+                    f"RDMA_WORKER gpu={_gpu} w={worker_index} "
+                    f"q_depth={len(queue)} pending_mb={_pend/1e6:.0f} "
+                    f"past_mb={_total_bytes/1e6:.0f} bw_gbps={_total_bytes/0.1/1e9:.2f} "
+                    f"util={_total_rdma_ms/100:.1f}%"
+                )
+        threading.Thread(target=_stats_reporter, daemon=True).start()
 
         while True:
             try:
