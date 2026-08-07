@@ -1603,10 +1603,14 @@ class MooncakeKVManager(CommonKVManager):
                 _page_start = kv_chunk.index_slice.start
                 _page_end = _page_start + _pages - 1
                 if _pages > 0:
+                    _dsts = ",".join(
+                        r.mooncake_session_id for r in reqs_to_be_processed
+                    )
                     logger.info(
                         f"RDMA_START gpu={_gpu} w={worker_index} room={kv_chunk.room} "
                         f"seq={_seq} pages={_pages} bytes={_bytes} "
-                        f"page_range=[{_page_start},{_page_end}]"
+                        f"page_range=[{_page_start},{_page_end}] "
+                        f"dsts=[{_dsts}]"
                     )
                 # When staging transfer is not yet ready (watermark/allocation pending),
                 # the chunk is re-enqueued and we break out of the req loop to retry later.
@@ -1713,7 +1717,7 @@ class MooncakeKVManager(CommonKVManager):
                             _path = "send_kvcache_mla" if self.is_mla_backend else "send_kvcache_equal_tp"
                             logger.info(
                                 f"RDMA_PATH gpu={_gpu} w={worker_index} room={kv_chunk.room} "
-                                f"seq={_seq} path={_path} dst_tp={target_rank_registration_info.dst_tp_rank} dst_tp_size={target_rank_registration_info.dst_attn_tp_size}"
+                                f"seq={_seq} path={_path} dst_tp={target_rank_registration_info.dst_tp_rank} pd_attn_tp_size_equal={target_rank_registration_info.dst_attn_tp_size == self.attn_tp_size}"
                             )
                             ret = self.send_kvcache(
                                 req.mooncake_session_id,
