@@ -1885,24 +1885,6 @@ class MooncakeKVManager(CommonKVManager):
                 _chunk_ct += 1
                 _total_bytes += _bytes
                 _total_rdma_ms += (_t_end - _t_start) * 1000
-                _now = time.perf_counter()
-                _elapsed = _now - _last_stats
-                if _elapsed >= 0.1:
-                    _bw = (_total_bytes / _elapsed / 1e9) if _elapsed > 0 else 0.0
-                    _util = (_total_rdma_ms / (_elapsed * 1000)) * 100 if _elapsed > 0 else 0.0
-                    _pend = 0
-                    if worker_index < len(MooncakeKVManager._queue_pending_bytes):
-                        with MooncakeKVManager._pbytes_lock:
-                            _pend = MooncakeKVManager._queue_pending_bytes[worker_index]
-                    logger.info(
-                        f"RDMA_WORKER gpu={_gpu} w={worker_index} "
-                        f"q_depth={len(queue)} pending_mb={_pend/1e6:.0f} "
-                        f"past_mb={_total_bytes/1e6:.0f} bw_gbps={_bw:.2f} util={_util:.1f}%"
-                    )
-                    _chunk_ct = 0
-                    _total_bytes = 0
-                    _total_rdma_ms = 0.0
-                    _last_stats = _now
 
                 if (
                     kv_chunk.room not in self.request_status
