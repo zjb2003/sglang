@@ -417,6 +417,11 @@ class Envs:
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT = EnvInt(300)
     SGLANG_DISAGGREGATION_NIXL_BACKEND = EnvStr("UCX")
     SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS = EnvStr("{}")
+    # Mooncake transfer_queue shard key selector:
+    #   "room"     - shard_idx = bootstrap_room % Q          (default, uniform)
+    #   "session"  - shard_idx = session_port_sum % Q        (legacy: same dst sessions -> same queue)
+    #   "combined" - shard_idx = (room + session_port_sum) % Q
+    SGLANG_DISAGG_SHARD_KEY = EnvStr("room")
     SGLANG_DISAGG_PREFILL_EARLY_SEND_CACHED_PREFIX = EnvBool(True)
 
     # PD queue-length snapshot logging interval (seconds). 0 disables it.

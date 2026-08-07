@@ -1704,8 +1704,7 @@ class MooncakeKVManager(CommonKVManager):
                         ):
                             _path = "send_kvcache_mla" if self.is_mla_backend else "send_kvcache_equal_tp"
                             logger.info(
-                                f"RDMA_PATH gpu={_gpu} w={worker_index} room={kv_chunk.room} "
-                                f"seq={_seq} path={_path} pd_attn_tp_size_equal={target_rank_registration_info.dst_attn_tp_size == self.attn_tp_size}"
+                                f"RDMA_PATH gpu={_gpu} w={worker_index} room={kv_chunk.room} seq={_seq} path={_path}"
                             )
                             if _pages > 0:
                                 logger.info(
@@ -2163,12 +2162,28 @@ class MooncakeKVManager(CommonKVManager):
             # add further chunks into the transfer queue.
             return
 
-        # NOTE(shangming): sharding according to the dst_infos to make sure
-        # requests with the same dst_sessions will be added into the same
-        # queue, which enables early abort with failed sessions.
-        dst_infos = self.transfer_infos[bootstrap_room].keys()
-        session_port_sum = sum(int(session.rsplit(":", 1)[1]) for session in dst_infos)
-        shard_idx = session_port_sum % len(self.transfer_queues)
+        # Shard key selection: controlled by SGLANG_DISAGG_SHARD_KEY.
+        #   room     -> uniform distribution based on bootstrap_room
+        #   session  -> legacy: same dst_sessions land on same queue
+        #                (enables early abort by walking one queue on session failure,
+        #                 but the current failure-recovery is lazy so this benefit is minor)
+        #   combined -> room + session_port_sum, mixes both
+        _shard_key = envs.SGLANG_DISAGG_SHARD_KEY.get()
+        if _shard_key == "room":
+            shard_idx = bootstrap_room % len(self.transfer_queues)
+        elif _shard_key == "session":
+            dst_infos = self.transfer_infos[bootstrap_room].keys()
+            session_port_sum = sum(int(session.rsplit(":", 1)[1]) for session in dst_infos)
+            shard_idx = session_port_sum % len(self.transfer_queues)
+        elif _shard_key == "combined":
+            dst_infos = self.transfer_infos[bootstrap_room].keys()
+            session_port_sum = sum(int(session.rsplit(":", 1)[1]) for session in dst_infos)
+            shard_idx = (bootstrap_room + session_port_sum) % len(self.transfer_queues)
+        else:
+            raise ValueError(
+                f"Unknown SGLANG_DISAGG_SHARD_KEY={_shard_key!r}; "
+                f"expected one of: room, session, combined"
+            )
 
         if trace_ctx is None:
             trace_ctx = TraceNullContext()
