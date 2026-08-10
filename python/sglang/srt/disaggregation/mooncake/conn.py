@@ -55,6 +55,7 @@ from sglang.srt.observability.mooncake_trace import (
     mooncake_trace_func,
     mooncake_trace_slice,
 )
+from sglang.srt.observability.req_time_stats import format_wallclock_ms
 from sglang.srt.observability.trace import (
     TraceNullContext,
     TraceReqContext,
@@ -1707,11 +1708,12 @@ class MooncakeKVManager(CommonKVManager):
                                 f"RDMA_PATH gpu={_gpu} w={worker_index} room={kv_chunk.room} seq={_seq} path={_path}"
                             )
                             if _pages > 0:
+                                _ts_start = format_wallclock_ms()
                                 logger.info(
                                     f"RDMA_START gpu={_gpu} w={worker_index} room={kv_chunk.room} "
                                     f"seq={_seq} pages={_pages} bytes={_bytes} "
                                     f"page_range=[{_page_start},{_page_end}] "
-                                    f"dst={req.mooncake_session_id}"
+                                    f"dst={req.mooncake_session_id} ts={_ts_start}"
                                 )
                             _dst_t0 = time.perf_counter()
                             ret = self.send_kvcache(
@@ -1726,12 +1728,13 @@ class MooncakeKVManager(CommonKVManager):
                             if _pages > 0:
                                 _dst_dur = time.perf_counter() - _dst_t0
                                 _dst_gbps = (_bytes * 8 / 1e9) / _dst_dur if _dst_dur > 0 else 0.0
+                                _ts_end = format_wallclock_ms()
                                 logger.info(
                                     f"RDMA_END gpu={_gpu} w={worker_index} room={kv_chunk.room} "
                                     f"seq={_seq} pages={_pages} bytes={_bytes} "
                                     f"dur_s={_dst_dur:.6f} gbps={_dst_gbps:.1f} "
                                     f"page_range=[{_page_start},{_page_end}] "
-                                    f"dst={req.mooncake_session_id} status={'ok' if ret == 0 else 'fail'}"
+                                    f"dst={req.mooncake_session_id} status={'ok' if ret == 0 else 'fail'} ts={_ts_end}"
                                 )
                                 if ret == 0:
                                     _total_bytes += _bytes
@@ -1746,11 +1749,12 @@ class MooncakeKVManager(CommonKVManager):
                                 f"seq={_seq} path=send_kvcache_staging dst_tp={target_rank_registration_info.dst_tp_rank} dst_tp_size={target_rank_registration_info.dst_attn_tp_size}"
                             )
                             if _pages > 0:
+                                _ts_start = format_wallclock_ms()
                                 logger.info(
                                     f"RDMA_START gpu={_gpu} w={worker_index} room={kv_chunk.room} "
                                     f"seq={_seq} pages={_pages} bytes={_bytes} "
                                     f"page_range=[{_page_start},{_page_end}] "
-                                    f"dst={req.mooncake_session_id}"
+                                    f"dst={req.mooncake_session_id} ts={_ts_start}"
                                 )
                             _dst_t0 = time.perf_counter()
                             ret, deferred = self._do_staging_transfer(
@@ -1770,12 +1774,13 @@ class MooncakeKVManager(CommonKVManager):
                             if _pages > 0:
                                 _dst_dur = time.perf_counter() - _dst_t0
                                 _dst_gbps = (_bytes * 8 / 1e9) / _dst_dur if _dst_dur > 0 else 0.0
+                                _ts_end = format_wallclock_ms()
                                 logger.info(
                                     f"RDMA_END gpu={_gpu} w={worker_index} room={kv_chunk.room} "
                                     f"seq={_seq} pages={_pages} bytes={_bytes} "
                                     f"dur_s={_dst_dur:.6f} gbps={_dst_gbps:.1f} "
                                     f"page_range=[{_page_start},{_page_end}] "
-                                    f"dst={req.mooncake_session_id} status={'ok' if ret == 0 else 'fail'}"
+                                    f"dst={req.mooncake_session_id} status={'ok' if ret == 0 else 'fail'} ts={_ts_end}"
                                 )
                                 if ret == 0:
                                     _total_bytes += _bytes
@@ -1787,11 +1792,12 @@ class MooncakeKVManager(CommonKVManager):
                                 f"src_tp={self.attn_tp_size} dst_tp={target_rank_registration_info.dst_tp_rank} dst_tp_size={target_rank_registration_info.dst_attn_tp_size}"
                             )
                             if _pages > 0:
+                                _ts_start = format_wallclock_ms()
                                 logger.info(
                                     f"RDMA_START gpu={_gpu} w={worker_index} room={kv_chunk.room} "
                                     f"seq={_seq} pages={_pages} bytes={_bytes} "
                                     f"page_range=[{_page_start},{_page_end}] "
-                                    f"dst={req.mooncake_session_id}"
+                                    f"dst={req.mooncake_session_id} ts={_ts_start}"
                                 )
                             _dst_t0 = time.perf_counter()
                             ret = self.send_kvcache_slice(
@@ -1807,12 +1813,13 @@ class MooncakeKVManager(CommonKVManager):
                             if _pages > 0:
                                 _dst_dur = time.perf_counter() - _dst_t0
                                 _dst_gbps = (_bytes * 8 / 1e9) / _dst_dur if _dst_dur > 0 else 0.0
+                                _ts_end = format_wallclock_ms()
                                 logger.info(
                                     f"RDMA_END gpu={_gpu} w={worker_index} room={kv_chunk.room} "
                                     f"seq={_seq} pages={_pages} bytes={_bytes} "
                                     f"dur_s={_dst_dur:.6f} gbps={_dst_gbps:.1f} "
                                     f"page_range=[{_page_start},{_page_end}] "
-                                    f"dst={req.mooncake_session_id} status={'ok' if ret == 0 else 'fail'}"
+                                    f"dst={req.mooncake_session_id} status={'ok' if ret == 0 else 'fail'} ts={_ts_end}"
                                 )
                                 if ret == 0:
                                     _total_bytes += _bytes
