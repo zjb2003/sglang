@@ -1537,17 +1537,24 @@ class MooncakeKVManager(CommonKVManager):
         _total_rdma_ms = 0.0
 
         def _stats_reporter():
+            _prev_bytes = 0
+            _prev_rdma_ms = 0.0
+            _prev_wall = time.time()
             while True:
                 time.sleep(0.1)
-                _pend = 0
-                if worker_index < len(MooncakeKVManager._queue_pending_bytes):
-                    with MooncakeKVManager._pbytes_lock:
-                        _pend = MooncakeKVManager._queue_pending_bytes[worker_index]
+                _now = time.time()
+                _dt = max(_now - _prev_wall, 1e-9)
+                _d_bytes = _total_bytes - _prev_bytes
+                _d_rdma_ms = _total_rdma_ms - _prev_rdma_ms
+                _prev_bytes = _total_bytes
+                _prev_rdma_ms = _total_rdma_ms
+                _prev_wall = _now
+                _ts = format_wallclock_ms()
                 logger.info(
-                    f"RDMA_WORKER gpu={_gpu} w={worker_index} "
-                    f"q_depth={len(queue)} pending_mb={_pend/1e6:.0f} "
-                    f"past_mb={_total_bytes/1e6:.0f} bw_gbps={_total_bytes/0.1/1e9:.2f} "
-                    f"util={_total_rdma_ms/100:.1f}%"
+                    f"RDMA_WORKER gpu={_gpu} w={worker_index} ts={_ts} "
+                    f"q_depth={len(queue)} "
+                    f"sent_mb={_d_bytes/1e6:.1f} bw_gbps={_d_bytes*8/_dt/1e9:.2f} "
+                    f"util={_d_rdma_ms/(_dt*1000)*100:.1f}%"
                 )
         threading.Thread(target=_stats_reporter, daemon=True).start()
 
@@ -1703,10 +1710,10 @@ class MooncakeKVManager(CommonKVManager):
                             or self.attn_tp_size
                             == target_rank_registration_info.dst_attn_tp_size
                         ):
-                            _path = "send_kvcache_mla" if self.is_mla_backend else "send_kvcache_equal_tp"
-                            logger.info(
-                                f"RDMA_PATH gpu={_gpu} w={worker_index} room={kv_chunk.room} seq={_seq} path={_path}"
-                            )
+                            # _path = "send_kvcache_mla" if self.is_mla_backend else "send_kvcache_equal_tp"
+                            # logger.info(
+                            #     f"RDMA_PATH gpu={_gpu} w={worker_index} room={kv_chunk.room} seq={_seq} path={_path}"
+                            # )
                             if _pages > 0:
                                 _ts_start = format_wallclock_ms()
                                 logger.info(
