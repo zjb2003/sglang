@@ -1603,7 +1603,7 @@ class MooncakeKVManager(CommonKVManager):
                     + self.attn_cp_rank
                 )
                 _pages = len(kv_chunk.prefill_kv_indices)
-                _bytes = _pages * self.kv_args.page_size * sum(self.kv_args.kv_item_lens)
+                _bytes = _pages * sum(self.kv_args.kv_item_lens)
                 _seq = _chunk_seq
                 _chunk_seq += 1
                 _page_start = kv_chunk.index_slice.start
@@ -2215,7 +2215,7 @@ class MooncakeKVManager(CommonKVManager):
                 enqueue_time=time.perf_counter(),
             )
         )
-        _chunk_bytes = len(kv_indices) * self.kv_args.page_size * sum(self.kv_args.kv_item_lens)
+        _chunk_bytes = len(kv_indices) * sum(self.kv_args.kv_item_lens)
         if shard_idx < len(MooncakeKVManager._queue_pending_bytes):
             with MooncakeKVManager._pbytes_lock:
                 MooncakeKVManager._queue_pending_bytes[shard_idx] += _chunk_bytes
