@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -122,14 +123,27 @@ def _resolve_dflash_aux_hidden_state(
         from sglang.srt.speculative.dflash_utils import parse_dflash_draft_config
 
         # Select target layers to capture for building draft context features.
-        draft_model_config = ModelConfig.from_server_args(
-            server_args,
-            model_path=(server_args.speculative_draft_model_path),
-            model_revision=server_args.speculative_draft_model_revision,
-            is_draft_model=True,
-        )
+        if spec_algorithm.is_dspark():
+            with open(
+                f"{server_args.speculative_draft_model_path}/config.json", "r"
+            ) as f:
+                draft_hf_config = json.load(f)
+            if (
+                "text_config" not in draft_hf_config
+                and "transformer_layer_config" in draft_hf_config
+            ):
+                draft_hf_config["text_config"] = draft_hf_config["transformer_layer_config"]
+            draft_model_config = None
+        else:
+            draft_model_config = ModelConfig.from_server_args(
+                server_args,
+                model_path=(server_args.speculative_draft_model_path),
+                model_revision=server_args.speculative_draft_model_revision,
+                is_draft_model=True,
+            )
+            draft_hf_config = draft_model_config.hf_config
         dflash_draft_config = parse_dflash_draft_config(
-            draft_hf_config=draft_model_config.hf_config
+            draft_hf_config=draft_hf_config
         )
         draft_num_layers = dflash_draft_config.require_num_layers()
         trained_target_layers = dflash_draft_config.num_target_layers
@@ -164,7 +178,7 @@ def _resolve_dflash_aux_hidden_state(
         # before each layer. Legacy Muse drafts already store layer-input ids.
         target_layer_ids = _map_muse_target_layer_ids(
             target_hf_config=model_config.hf_config,
-            draft_hf_config=draft_model_config.hf_config,
+            draft_hf_config=draft_hf_config,
             layer_ids=target_layer_ids,
         )
 
@@ -174,7 +188,7 @@ def _resolve_dflash_aux_hidden_state(
             )
 
             dspark_draft_config = parse_dspark_draft_config(
-                draft_hf_config=draft_model_config.hf_config
+                draft_hf_config=draft_hf_config
             )
             if not dspark_draft_config.require_markov():
                 raise ValueError(
@@ -187,10 +201,14 @@ def _resolve_dflash_aux_hidden_state(
         config.dflash_use_aux_hidden_state = True
         config.dflash_draft_num_layers = int(draft_num_layers)
         config.dflash_target_layer_ids = target_layer_ids
-        config.dflash_draft_cell_size_per_token = _resolve_dflash_draft_cell_size(
-            server_args=server_args,
-            draft_model_config=draft_model_config,
-            draft_num_layers=int(draft_num_layers),
+        config.dflash_draft_cell_size_per_token = (
+            None
+            if draft_model_config is None
+            else _resolve_dflash_draft_cell_size(
+                server_args=server_args,
+                draft_model_config=draft_model_config,
+                draft_num_layers=int(draft_num_layers),
+            )
         )
 
 

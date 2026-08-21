@@ -22,20 +22,33 @@ DSV4_DRAFT_ATTENTION_BACKEND = "dsv4"
 
 
 def draft_is_deepseek_v4(*, server_args: ServerArgs) -> bool:
+    from pathlib import Path
+
     from sglang.srt.configs.model_config import is_deepseek_v4
     from sglang.srt.utils.hf_transformers_utils import get_config
 
     draft_model_path = server_args.speculative_draft_model_path
     if not draft_model_path:
         return False
-    draft_hf_config = get_config(
-        draft_model_path,
-        trust_remote_code=server_args.trust_remote_code,
-        revision=server_args.speculative_draft_model_revision,
-        model_override_args=json.loads(server_args.json_model_override_args),
-        model_config_parser=server_args.model_config_parser,
-    )
-    return draft_hf_config is not None and is_deepseek_v4(draft_hf_config)
+    try:
+        draft_hf_config = get_config(
+            draft_model_path,
+            trust_remote_code=server_args.trust_remote_code,
+            revision=server_args.speculative_draft_model_revision,
+            model_override_args=json.loads(server_args.json_model_override_args),
+            model_config_parser=server_args.model_config_parser,
+        )
+        return draft_hf_config is not None and is_deepseek_v4(draft_hf_config)
+    except ValueError as e:
+        if "Should have a `model_type` key" not in str(e):
+            raise
+        config_path = Path(draft_model_path) / "config.json"
+        if not config_path.exists():
+            raise
+        with open(config_path, "r") as f:
+            raw_config = json.load(f)
+        archs = raw_config.get("architectures") or []
+        return any("Deepseek" in arch or "DeepSeek" in arch for arch in archs)
 
 
 def dspark_gamma_from_num_draft_tokens(num_draft_tokens: int) -> int:

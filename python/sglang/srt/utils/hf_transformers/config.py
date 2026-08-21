@@ -13,7 +13,9 @@
 # ==============================================================================
 """Config loading utilities."""
 
+from pathlib import json
 from pathlib import Path
+import Path
 from typing import Optional
 
 from transformers import PretrainedConfig
@@ -85,12 +87,30 @@ class HfModelConfigParser(ModelConfigParserBase):
     ):
         config = _try_load_longcat_config(model, revision, **kwargs)
         if config is None:
-            config = AutoConfig.from_pretrained(
-                model,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                **kwargs,
-            )
+            try:
+                config = AutoConfig.from_pretrained(
+                    model,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    **kwargs,
+                )
+            except ValueError as e:
+                config_path = Path(model) / "config.json" if isinstance(model, str) else None
+                if (
+                    "Should have a `model_type` key" not in str(e)
+                    or config_path is None
+                    or not config_path.exists()
+                ):
+                    raise
+                with open(config_path, "r") as f:
+                    raw_config = json.load(f)
+                if raw_config.get("speculators_model_type") != "dspark":
+                    raise
+                raw_config.setdefault("model_type", "dspark")
+                raw_config.setdefault("text_config", raw_config.get("transformer_layer_config", {}))
+                raw_config.setdefault("dflash_config", raw_config.get("speculators_config", {}))
+                raw_config.setdefault("dspark_config", raw_config.get("speculators_config", {}))
+                config = PretrainedConfig.from_dict(raw_config)
 
         if (
             config.architectures is not None
