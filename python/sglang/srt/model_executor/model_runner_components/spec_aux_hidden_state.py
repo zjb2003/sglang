@@ -133,6 +133,8 @@ def _resolve_dflash_aux_hidden_state(
                 and "transformer_layer_config" in draft_hf_config
             ):
                 draft_hf_config["text_config"] = draft_hf_config["transformer_layer_config"]
+            if draft_hf_config.get("target_layer_ids") is None and draft_hf_config.get("aux_hidden_state_layer_ids") is not None:
+                draft_hf_config["target_layer_ids"] = draft_hf_config["aux_hidden_state_layer_ids"]
             draft_model_config = None
         else:
             draft_model_config = ModelConfig.from_server_args(

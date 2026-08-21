@@ -13,9 +13,8 @@
 # ==============================================================================
 """Config loading utilities."""
 
-from pathlib import json
+import json
 from pathlib import Path
-import Path
 from typing import Optional
 
 from transformers import PretrainedConfig
@@ -110,6 +109,10 @@ class HfModelConfigParser(ModelConfigParserBase):
                 raw_config.setdefault("text_config", raw_config.get("transformer_layer_config", {}))
                 raw_config.setdefault("dflash_config", raw_config.get("speculators_config", {}))
                 raw_config.setdefault("dspark_config", raw_config.get("speculators_config", {}))
+                if raw_config.get("target_layer_ids") is None and raw_config.get("aux_hidden_state_layer_ids") is not None:
+                    raw_config["target_layer_ids"] = raw_config["aux_hidden_state_layer_ids"]
+                    raw_config["dflash_config"]["target_layer_ids"] = raw_config["aux_hidden_state_layer_ids"]
+                    raw_config["dspark_config"]["target_layer_ids"] = raw_config["aux_hidden_state_layer_ids"]
                 config = PretrainedConfig.from_dict(raw_config)
 
         if (
